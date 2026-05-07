@@ -1,189 +1,131 @@
-"""
-Celery tasks for post-call processing.
-
-This is the main background processing pipeline. Every completed interaction
-with a long transcript ends up here.
-
-The task runs five steps sequentially:
-    1. Wait 45s, try to fetch recording from Exotel → upload to S3
-    2. Run full LLM analysis on the transcript
-    3. Write result to interaction_metadata (dashboard cache)
-    4. Trigger signal jobs (downstream actions: WhatsApp, callbacks, etc.)
-    5. Update lead stage
-
-A few things worth understanding before you start changing things:
-
-WHY CELERY + REDIS?
-  We needed a task queue and Celery was already in the stack. Redis was already
-  in the stack. It worked fine at 1K calls/day. At 100K calls/campaign the cracks
-  show: broker restarts lose tasks, queue depth is invisible, and there's no way
-  to see which step a given interaction is stuck on.
-
-WHY ONE QUEUE?
-  Originally there was only one customer. One queue was fine. We never revisited
-  it when the platform became multi-customer. Now a campaign for Customer A can
-  fill the queue and delay Customer B's results by hours.
-
-WHY DOES RECORDING BLOCK ANALYSIS?
-  It shouldn't. Recording upload and LLM analysis are completely independent —
-  the LLM reads the transcript, not the audio file. But they're sequential here
-  because that's how the task was originally written and nobody had a reason to
-  split them until the 45-second sleep became a visible SLA problem.
-
-  Think about what "run them in parallel" would require at the infrastructure level.
-"""
-
 import asyncio
 import logging
-from datetime import datetime
 from typing import Any, Dict
+from uuid import UUID
 
+from src.config import settings
+from src.llm_workers.worker import llm_worker_service
+from src.models.workflow import JobPriority, JobType
+from src.orchestrator.workflow import workflow_orchestrator
+from src.recording.worker import recording_worker_service
+from src.repositories.jobs import job_repository
 from src.tasks.celery_app import celery_app
-from src.services.post_call_processor import PostCallProcessor, PostCallContext
-from src.services.recording import fetch_and_upload_recording
-from src.services.signal_jobs import trigger_signal_jobs, update_lead_stage
-from src.services.retry_queue import retry_queue
-from src.services.metrics import metrics_tracker
+from src.utils.db import async_session_factory
+from src.workers.result_worker import result_worker_service
 
 logger = logging.getLogger(__name__)
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 
 @celery_app.task(
     name="process_interaction_end_background_task",
     bind=True,
-    max_retries=3,
-    default_retry_delay=60,  # Fixed 60s — no exponential backoff
-    acks_late=True,           # Task only acked after completion, not on receipt.
-                              # This means a worker crash causes redelivery — good.
-                              # But "redelivery" goes to the back of the queue,
-                              # which at 100K depth means hours of extra wait.
-    queue="postcall_processing",
+    acks_late=True,
+    reject_on_worker_lost=True,
 )
 def process_interaction_end_background_task(self, payload: Dict[str, Any]):
     """
-    Main Celery task. Called for every long-transcript interaction.
+    Backward-compatible entry point.
 
-    Celery workers are synchronous by default, so we spin up an event loop
-    per task to run the async processing code. This means each Celery worker
-    process handles one interaction at a time — no concurrency within a worker.
-
-    At 100K interactions/campaign with ~3,500ms LLM latency per call:
-        100,000 × 3.5s = 350,000 worker-seconds needed
-        With 10 workers: ~9.7 hours to drain the queue
-
-    If your campaign window is 8 hours, you're already behind before you start.
+    Older callers may still enqueue the historical Celery task. We no longer do
+    the work inside Celery. We persist an ORCHESTRATE_INTERACTION job and then
+    run one orchestrator tick. If this Celery message is lost, the new webhook
+    path still has the durable DB row; if this compatibility task is retried,
+    idempotency prevents duplicate processing.
     """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    return _run(_persist_legacy_payload_and_orchestrate(payload))
 
-    try:
-        loop.run_until_complete(_process_interaction(self, payload))
-    except Exception as e:
-        logger.exception(
-            "celery_task_failed",
-            extra={
-                "interaction_id": payload.get("interaction_id"),
-                "error": str(e),
-                "attempt": self.request.retries,
-            },
-        )
-        # Failed tasks go into PostCallRetryQueue (Redis) AND Celery retries.
-        # Two retry mechanisms that don't know about each other. An interaction
-        # can end up being processed twice if both fire.
-        loop.run_until_complete(
-            retry_queue.enqueue_retry(
-                interaction_id=payload["interaction_id"],
-                error=str(e),
+
+async def _persist_legacy_payload_and_orchestrate(payload: Dict[str, Any]) -> Dict[str, Any]:
+    async with async_session_factory() as session:
+        async with session.begin():
+            job = await job_repository.create_if_absent(
+                session,
+                interaction_id=UUID(str(payload["interaction_id"])),
+                session_id=UUID(str(payload["session_id"])),
+                lead_id=UUID(str(payload["lead_id"])),
+                campaign_id=UUID(str(payload["campaign_id"])),
+                customer_id=UUID(str(payload["customer_id"])),
+                job_type=JobType.ORCHESTRATE_INTERACTION,
+                priority=JobPriority.HIGH,
+                idempotency_key=f"interaction:{payload['interaction_id']}:orchestrate:v1",
                 payload=payload,
             )
+
+    processed = await _run_orchestrator(limit=1)
+    return {"job_id": str(job.id), "orchestrated": processed}
+
+
+@celery_app.task(
+    name="run_workflow_orchestrator_task",
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def run_workflow_orchestrator_task(self, limit: int = settings.JOB_CLAIM_BATCH_SIZE):
+    return _run(_run_orchestrator(limit=limit))
+
+
+async def _run_orchestrator(limit: int) -> int:
+    async with async_session_factory() as session:
+        async with session.begin():
+            return await workflow_orchestrator.run_once(session, limit=limit)
+
+
+@celery_app.task(
+    name="run_llm_worker_task",
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def run_llm_worker_task(self, limit: int = 10):
+    return _run(llm_worker_service.run_once(limit=limit))
+
+
+@celery_app.task(
+    name="run_recording_worker_task",
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def run_recording_worker_task(self, limit: int = settings.JOB_CLAIM_BATCH_SIZE):
+    return _run(recording_worker_service.run_once(limit=limit))
+
+
+@celery_app.task(
+    name="run_result_worker_task",
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def run_result_worker_task(self, limit: int = settings.JOB_CLAIM_BATCH_SIZE):
+    return _run(result_worker_service.run_once(limit=limit))
+
+
+@celery_app.task(
+    name="run_all_workers_once_task",
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def run_all_workers_once_task(self):
+    async def _run_all() -> Dict[str, int]:
+        orchestrated = await _run_orchestrator(limit=settings.JOB_CLAIM_BATCH_SIZE)
+        recordings = await recording_worker_service.run_once(
+            limit=settings.JOB_CLAIM_BATCH_SIZE
         )
-        raise self.retry(exc=e)
-    finally:
-        loop.close()
-
-
-async def _process_interaction(task, payload: Dict[str, Any]):
-    interaction_id = payload["interaction_id"]
-
-    await metrics_tracker.track_processing_started(interaction_id)
-
-    ctx = PostCallContext(
-        interaction_id=interaction_id,
-        session_id=payload["session_id"],
-        lead_id=payload["lead_id"],
-        campaign_id=payload["campaign_id"],
-        customer_id=payload["customer_id"],
-        agent_id=payload["agent_id"],
-        call_sid=payload.get("call_sid", ""),
-        transcript_text=payload.get("transcript_text", ""),
-        conversation_data=payload.get("conversation_data", {}),
-        additional_data=payload.get("additional_data", {}),
-        ended_at=datetime.fromisoformat(payload["ended_at"]),
-        exotel_account_id=payload.get("exotel_account_id"),
-    )
-
-    # ── Step 1: Recording ─────────────────────────────────────────────────────
-    # Blocks here for ~45 seconds waiting for Exotel to make the recording
-    # available. The LLM analysis (step 2) cannot start until this completes,
-    # even though it has zero dependency on the recording.
-    #
-    # Under load, recordings often arrive in 10–15s. We wait 45s anyway.
-    # Sometimes they arrive after 60s. We've already given up by then.
-    recording_s3_key = await fetch_and_upload_recording(
-        interaction_id=ctx.interaction_id,
-        call_sid=ctx.call_sid,
-        exotel_account_id=ctx.exotel_account_id or "",
-    )
-
-    if recording_s3_key:
-        logger.info(
-            "recording_uploaded",
-            extra={"interaction_id": interaction_id, "s3_key": recording_s3_key},
+        llm = await llm_worker_service.run_once(limit=10)
+        results = await result_worker_service.run_once(
+            limit=settings.JOB_CLAIM_BATCH_SIZE
         )
-    # If recording_s3_key is None, we continue silently. No alert, no retry,
-    # no flag on the interaction. The recording is just gone.
+        return {
+            "orchestrated": orchestrated,
+            "recordings": recordings,
+            "llm": llm,
+            "results": results,
+        }
 
-    # ── Step 2: LLM analysis ──────────────────────────────────────────────────
-    # Full analysis on every call. 1,500 tokens average. No pre-screening.
-    # A call where the customer said "wrong number" after one sentence gets the
-    # same treatment as a confirmed rebook.
-    #
-    # The LLM rate limit (settings.LLM_TOKENS_PER_MINUTE) is not checked before
-    # this call. If we're over the limit, the provider returns a 429 and this
-    # raises an exception, which triggers Celery retry — which goes to the back
-    # of the 100K-item queue and makes the problem worse.
-    processor = PostCallProcessor()
-    result = await processor.process_post_call(ctx, single_prompt=True)
-
-    await metrics_tracker.track_processing_completed(
-        interaction_id, result.tokens_used, result.latency_ms
-    )
-
-    # ── Step 3: Signal jobs ───────────────────────────────────────────────────
-    # Downstream actions: send a WhatsApp follow-up, book a callback slot,
-    # push to the customer's CRM. These depend on knowing the analysis result.
-    #
-    # If this raises, we log a warning and continue — the lead stage still
-    # updates. But the downstream action (WhatsApp, callback, CRM push) is lost.
-    try:
-        await trigger_signal_jobs(
-            interaction_id=ctx.interaction_id,
-            session_id=ctx.session_id,
-            campaign_id=ctx.campaign_id,
-            analysis_result=result.raw_response,
-        )
-    except Exception as e:
-        logger.warning("signal_jobs_failed", extra={"error": str(e)})
-
-    # ── Step 4: Lead stage update ─────────────────────────────────────────────
-    # Updates the lead's stage in the leads table based on call_stage.
-    # e.g., "rebook_confirmed" → lead moves to "booked" stage.
-    # Same fire-and-forget risk as signal_jobs above.
-    try:
-        await update_lead_stage(
-            lead_id=ctx.lead_id,
-            interaction_id=ctx.interaction_id,
-            call_stage=result.call_stage,
-        )
-    except Exception as e:
-        logger.warning("lead_stage_update_failed", extra={"error": str(e)})
+    return _run(_run_all())

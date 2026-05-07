@@ -79,6 +79,107 @@ CREATE INDEX idx_interactions_customer ON interactions(customer_id);
 CREATE INDEX idx_interactions_call_sid ON interactions(call_sid);
 CREATE INDEX idx_interactions_status ON interactions(status);
 
+CREATE TABLE interaction_jobs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    interaction_id UUID NOT NULL REFERENCES interactions(id),
+    session_id UUID NOT NULL,
+    lead_id UUID NOT NULL,
+    campaign_id UUID NOT NULL,
+    customer_id UUID NOT NULL,
+
+    job_type VARCHAR(100) NOT NULL,
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
+    priority VARCHAR(20) NOT NULL DEFAULT 'MEDIUM',
+
+    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+    payload JSONB NOT NULL DEFAULT '{}',
+    result JSONB NOT NULL DEFAULT '{}',
+
+    token_estimate INTEGER NOT NULL DEFAULT 0,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    run_after TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    locked_by VARCHAR(255),
+    locked_at TIMESTAMPTZ,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+
+    last_error_code VARCHAR(100),
+    last_error_message TEXT,
+
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_interaction_jobs_ready ON interaction_jobs(status, run_after, priority, created_at);
+CREATE INDEX idx_interaction_jobs_customer_status ON interaction_jobs(customer_id, status);
+CREATE INDEX idx_interaction_jobs_interaction ON interaction_jobs(interaction_id);
+CREATE INDEX idx_interaction_jobs_campaign ON interaction_jobs(campaign_id);
+CREATE INDEX idx_interaction_jobs_type ON interaction_jobs(job_type);
+
+CREATE TABLE customer_token_usage (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    customer_id UUID NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    budget_tokens INTEGER NOT NULL,
+    reserved_tokens INTEGER NOT NULL DEFAULT 0,
+    used_tokens INTEGER NOT NULL DEFAULT 0,
+    requests_reserved INTEGER NOT NULL DEFAULT 0,
+    requests_used INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT uq_customer_token_usage_window UNIQUE(customer_id, window_start)
+);
+
+CREATE INDEX idx_customer_token_usage_customer ON customer_token_usage(customer_id);
+CREATE INDEX idx_customer_token_usage_window ON customer_token_usage(window_start);
+
+CREATE TABLE audit_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    interaction_id UUID,
+    job_id UUID,
+    customer_id UUID,
+    campaign_id UUID,
+    stage VARCHAR(100) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    token_usage INTEGER NOT NULL DEFAULT 0,
+    error_code VARCHAR(100),
+    message TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX idx_audit_events_interaction ON audit_events(interaction_id);
+CREATE INDEX idx_audit_events_job ON audit_events(job_id);
+CREATE INDEX idx_audit_events_customer ON audit_events(customer_id);
+CREATE INDEX idx_audit_events_stage ON audit_events(stage);
+CREATE INDEX idx_audit_events_status ON audit_events(status);
+CREATE INDEX idx_audit_events_created ON audit_events(created_at);
+
+CREATE TABLE dead_letter_jobs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    original_job_id UUID NOT NULL,
+    interaction_id UUID NOT NULL,
+    customer_id UUID NOT NULL,
+    campaign_id UUID NOT NULL,
+    job_type VARCHAR(100) NOT NULL,
+    stage VARCHAR(100) NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error_code VARCHAR(100),
+    last_error_message TEXT,
+    failed_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    replayed_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_dead_letter_jobs_original ON dead_letter_jobs(original_job_id);
+CREATE INDEX idx_dead_letter_jobs_interaction ON dead_letter_jobs(interaction_id);
+CREATE INDEX idx_dead_letter_jobs_customer ON dead_letter_jobs(customer_id);
+CREATE INDEX idx_dead_letter_jobs_type ON dead_letter_jobs(job_type);
+
 -- Seed data: sample interactions for testing
 -- (Uses fixed UUIDs for reproducibility)
 

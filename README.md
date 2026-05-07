@@ -30,25 +30,25 @@ POST /session/{sid}/interaction/{iid}/end
     └── Celery: process_interaction_end_background_task
                     │
             ┌───────▼────────────────────────┐
-            │  PostCallCircuitBreaker         │
-            │  PostCallProcessor → LLM        │
-            │  asyncio.sleep(45s) → recording │
-            │  PostCallRetryQueue (Redis)      │
+            │  PostCallCircuitBreaker        │
+            │  PostCallProcessor → LLM       │
+            │  asyncio.sleep(45s) → recording│
+            │  PostCallRetryQueue (Redis)    │
             └────────────────────────────────┘
 ```
 
 ### Key Files
-
-| File | What It Does |
-|------|-------------|
-| `src/api/endpoints.py` | FastAPI endpoint — receives call-end webhook from telephony provider |
-| `src/tasks/celery_tasks.py` | Celery task — orchestrates all post-call processing |
-| `src/services/post_call_processor.py` | LLM analysis — runs on every completed call |
-| `src/services/recording.py` | Recording fetch + S3 upload |
-| `src/services/circuit_breaker.py` | Attempts to protect the dialler from LLM overload |
-| `src/services/retry_queue.py` | Redis-based retry for failed tasks |
-| `src/config.py` | All configuration — note the LLM rate limit settings |
-
+|--------------------------------------------------------------------------------------------------------------|
+| File                                  | What It Does                                                         |
+|---------------------------------------|----------------------------------------------------------------------|
+| `src/api/endpoints.py`                | FastAPI endpoint — receives call-end webhook from telephony provider |
+| `src/tasks/celery_tasks.py`           | Celery task — orchestrates all post-call processing                  |
+| `src/services/post_call_processor.py` | LLM analysis — runs on every completed call                          |
+| `src/services/recording.py`           | Recording fetch + S3 upload                                          |
+| `src/services/circuit_breaker.py`     | Attempts to protect the dialler from LLM overload                    |
+| `src/services/retry_queue.py`         | Redis-based retry for failed tasks                                   |
+| `src/config.py`                       | All configuration — note the LLM rate limit settings                 |
+|--------------------------------------------------------------------------------------------------------------|
 ### Known Failure Modes
 
 The inline comments throughout the codebase describe specific problems. The most severe ones to address:
@@ -212,6 +212,7 @@ Implement the highest-impact parts of your design. The scope is deliberately lar
 ## Getting Started
 
 ```bash
+
 # 1. Read the current system — understand before changing
 cat src/config.py                        # Note the rate limit settings
 cat src/tasks/celery_tasks.py            # The main processing pipeline
@@ -234,6 +235,7 @@ cp SUBMISSION_TEMPLATE.md SUBMISSION.md
 # 6. Implement your solution
 # You may change any part of the codebase, including the API interface.
 # Explain significant interface changes in SUBMISSION.md.
+
 ```
 
 ---

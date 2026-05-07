@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional
 from dataclasses import dataclass
 
 from src.config import settings
-from src.services.circuit_breaker import circuit_breaker
+from src.llm.client import LLMClient, llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +75,14 @@ class PostCallProcessor:
     we've already been 429-ing for a while.
     """
 
+    def __init__(self, client: LLMClient | None = None):
+        self._llm_client = client or llm_client
+
     async def process_post_call(
-        self, ctx: PostCallContext, single_prompt: bool = True
+        self,
+        ctx: PostCallContext,
+        single_prompt: bool = True,
+        persist_result: bool = True,
     ) -> AnalysisResult:
         """
         Run LLM analysis and write result to interaction_metadata.
@@ -90,13 +96,6 @@ class PostCallProcessor:
           - Check whether this customer has exceeded their allocated budget
           - Consider whether this call's outcome even warrants full analysis
         """
-
-        # Tells the circuit breaker an LLM request is in flight.
-        # Note: this increments llm:postcall:rpm but doesn't check it first.
-        # The check happens in circuit_breaker.check_capacity(), which is
-        # called by the dialler — not here, before spending the tokens.
-        await circuit_breaker.record_postcall_start()
-
         try:
             prompt = self._build_analysis_prompt(
                 ctx.transcript_text,
@@ -113,7 +112,8 @@ class PostCallProcessor:
             # Result written to interaction_metadata — the dashboard's hot cache.
             # There is no separate "analysis results" table. The JSONB column on
             # the interactions row is the only place this data lives.
-            await self._update_interaction_metadata(ctx.interaction_id, result)
+            if persist_result:
+                await self._update_interaction_metadata(ctx.interaction_id, result)
 
             logger.info(
                 "postcall_analysis_complete",
@@ -144,9 +144,6 @@ class PostCallProcessor:
                 },
             )
             raise
-
-        finally:
-            await circuit_breaker.record_postcall_end()
 
     def _build_analysis_prompt(
         self,
@@ -194,16 +191,7 @@ Respond in JSON format:
 
         Mock implementation for the assessment.
         """
-        # The provider's response includes a `usage` block:
-        # {"prompt_tokens": N, "completion_tokens": M, "total_tokens": N+M}
-        # We surface total_tokens in AnalysisResult but don't write it back
-        # anywhere that could be used for budget tracking or alerting.
-        return {
-            "call_stage": "unknown",
-            "entities": {},
-            "summary": "Mock analysis result",
-            "usage": {"total_tokens": 1500},
-        }
+        return await self._llm_client.analyze_call(prompt)
 
     def _parse_response(self, response: dict, latency_ms: float) -> AnalysisResult:
         return AnalysisResult(

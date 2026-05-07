@@ -1,9 +1,11 @@
 import os
+from typing import List
 
 
 class Settings:
     DATABASE_URL: str = os.getenv(
-        "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/voicebot"
+        "DATABASE_URL",
+        "postgresql+asyncpg://postgres:postgres@localhost:5432/voicebot",
     )
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -12,51 +14,68 @@ class Settings:
         "CELERY_RESULT_BACKEND", "redis://localhost:6379/2"
     )
 
-    # ── LLM ───────────────────────────────────────────────────────────────────
-    # One provider, one model, one key. Everyone shares it.
-    # These limits come straight from the provider's dashboard — they are HARD
-    # limits that result in 429 errors when exceeded, not soft suggestions.
-    #
-    # At 100K calls/campaign: if even 10% hit the LLM concurrently that's
-    # 10,000 requests fighting for 500 slots/min. You do the math.
-    #
-    # Worth noting: LLM_TOKENS_PER_MINUTE and LLM_REQUESTS_PER_MINUTE are
-    # defined here but grep the codebase — nothing actually reads them before
-    # firing a request. They exist as documentation, not enforcement.
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o")
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "sk-mock-key-for-assessment")
     LLM_TOKENS_PER_MINUTE: int = int(os.getenv("LLM_TOKENS_PER_MINUTE", "90000"))
     LLM_REQUESTS_PER_MINUTE: int = int(os.getenv("LLM_REQUESTS_PER_MINUTE", "500"))
-
-    # Average tokens consumed per post-call analysis (measured from prod logs).
-    # Useful if you're trying to estimate how many calls can be processed per
-    # minute before hitting LLM_TOKENS_PER_MINUTE.
     LLM_AVG_TOKENS_PER_CALL: int = int(os.getenv("LLM_AVG_TOKENS_PER_CALL", "1500"))
+    LLM_MAX_PROMPT_TOKENS: int = int(os.getenv("LLM_MAX_PROMPT_TOKENS", "12000"))
+    LLM_RESERVATION_SAFETY_FACTOR: float = float(
+        os.getenv("LLM_RESERVATION_SAFETY_FACTOR", "1.15")
+    )
 
-    # ── Recording ─────────────────────────────────────────────────────────────
-    # Why 45 seconds? Someone measured the average Exotel delivery time once,
-    # added a buffer, and hardcoded it. That was on a quiet Friday afternoon.
-    # Under load the delivery window is 10s–120s with no guarantee.
-    RECORDING_WAIT_SECONDS: int = 45
+    CUSTOMER_DEFAULT_TOKENS_PER_MINUTE: int = int(
+        os.getenv("CUSTOMER_DEFAULT_TOKENS_PER_MINUTE", "15000")
+    )
+    CUSTOMER_MIN_RESERVED_TOKENS_PER_MINUTE: int = int(
+        os.getenv("CUSTOMER_MIN_RESERVED_TOKENS_PER_MINUTE", "3000")
+    )
+
+    RECORDING_INITIAL_RETRY_SECONDS: int = int(
+        os.getenv("RECORDING_INITIAL_RETRY_SECONDS", "5")
+    )
+    RECORDING_MAX_RETRY_SECONDS: int = int(
+        os.getenv("RECORDING_MAX_RETRY_SECONDS", "120")
+    )
+    RECORDING_MAX_ATTEMPTS: int = int(os.getenv("RECORDING_MAX_ATTEMPTS", "8"))
     S3_BUCKET: str = os.getenv("S3_BUCKET", "voicebot-recordings")
+    RECORDING_ENCRYPTION_KEY_ID: str = os.getenv(
+        "RECORDING_ENCRYPTION_KEY_ID", "local-dev-key"
+    )
 
-    # ── Circuit breaker ───────────────────────────────────────────────────────
-    # When LLM usage hits 90% of capacity, the circuit breaker trips and the
-    # dialler freezes for 30 minutes. This was meant to prevent 429s.
-    # In practice it just means the dialler stops making calls while the LLM
-    # queue drains — business impact: zero new calls for half an hour.
-    #
-    # 1800 seconds = 30 minutes. The sales team noticed before the engineers did.
-    CIRCUIT_BREAKER_CAPACITY_THRESHOLD: float = 0.90
-    CIRCUIT_BREAKER_FREEZE_SECONDS: int = 1800
+    POSTCALL_CELERY_QUEUE: str = os.getenv("POSTCALL_CELERY_QUEUE", "postcall_processing")
+    WORKFLOW_CELERY_QUEUE: str = os.getenv("WORKFLOW_CELERY_QUEUE", "workflow")
+    LLM_HIGH_PRIORITY_QUEUE: str = os.getenv("LLM_HIGH_PRIORITY_QUEUE", "llm_high")
+    LLM_MEDIUM_PRIORITY_QUEUE: str = os.getenv("LLM_MEDIUM_PRIORITY_QUEUE", "llm_medium")
+    LLM_LOW_PRIORITY_QUEUE: str = os.getenv("LLM_LOW_PRIORITY_QUEUE", "llm_low")
 
-    # ── Post-call processing ──────────────────────────────────────────────────
-    # Single queue. Everything goes here. A "not interested" 10-second call
-    # and a confirmed rebook sit in the same line at the same priority.
-    POSTCALL_CELERY_QUEUE: str = "postcall_processing"
-    POSTCALL_MAX_RETRIES: int = 3
-    POSTCALL_RETRY_DELAY: int = 60  # Fixed delay — not exponential backoff
+    WORKFLOW_MAX_ATTEMPTS: int = int(os.getenv("WORKFLOW_MAX_ATTEMPTS", "5"))
+    WORKFLOW_BASE_RETRY_SECONDS: int = int(
+        os.getenv("WORKFLOW_BASE_RETRY_SECONDS", "10")
+    )
+    WORKFLOW_MAX_RETRY_SECONDS: int = int(
+        os.getenv("WORKFLOW_MAX_RETRY_SECONDS", "900")
+    )
+    JOB_CLAIM_BATCH_SIZE: int = int(os.getenv("JOB_CLAIM_BATCH_SIZE", "25"))
+    JOB_LOCK_TIMEOUT_SECONDS: int = int(os.getenv("JOB_LOCK_TIMEOUT_SECONDS", "300"))
+    SCHEDULER_IDLE_SLEEP_SECONDS: float = float(
+        os.getenv("SCHEDULER_IDLE_SLEEP_SECONDS", "1.0")
+    )
+
+    WEBHOOK_SIGNING_SECRET: str = os.getenv("WEBHOOK_SIGNING_SECRET", "")
+    WEBHOOK_SIGNATURE_HEADER: str = os.getenv(
+        "WEBHOOK_SIGNATURE_HEADER", "X-Webhook-Signature"
+    )
+    PII_LOG_FIELDS: List[str] = [
+        "phone",
+        "lead_phone",
+        "email",
+        "name",
+        "transcript",
+        "transcript_text",
+        "recording_url",
+    ]
 
 
 settings = Settings()

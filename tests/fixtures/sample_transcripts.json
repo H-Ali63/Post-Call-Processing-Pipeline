@@ -3,7 +3,7 @@
     "rebook_confirmed": {
       "description": "Customer confirms rebooking an appointment — HIGH VALUE, should be processed immediately",
       "transcript": [
-        {"role": "agent", "content": "Hello, am I speaking with Mr. Sharma?"},
+        {"role": "agent", "content": "Hello, am I speaking with Mr. Ali?"},
         {"role": "customer", "content": "Haan ji, bol raha hoon."},
         {"role": "agent", "content": "Sir, I'm calling from Cashify regarding your phone evaluation. Your appointment was scheduled for yesterday but we couldn't connect. Can we reschedule?"},
         {"role": "customer", "content": "Oh haan, kal main busy tha. Tomorrow works for me."},
@@ -21,7 +21,7 @@
     "not_interested": {
       "description": "Customer clearly not interested — LOW VALUE, can be processed in batch",
       "transcript": [
-        {"role": "agent", "content": "Hello, am I speaking with Ms. Gupta?"},
+        {"role": "agent", "content": "Hello, am I speaking with Ms. Anubhav?"},
         {"role": "customer", "content": "Yes."},
         {"role": "agent", "content": "Ma'am, I'm calling from XYZ regarding the insurance plan you inquired about."},
         {"role": "customer", "content": "I'm not interested. Please don't call me again."},
@@ -35,7 +35,7 @@
     "callback_requested": {
       "description": "Customer asks to be called back later — MEDIUM VALUE, ambiguous",
       "transcript": [
-        {"role": "agent", "content": "Hello sir, am I speaking with Rajesh?"},
+        {"role": "agent", "content": "Hello sir, am I speaking with Anubhav?"},
         {"role": "customer", "content": "Haan, kaun bol raha hai?"},
         {"role": "agent", "content": "Sir, I'm calling from ABC about your loan application."},
         {"role": "customer", "content": "Abhi main meeting mein hoon, baad mein call karo."},
