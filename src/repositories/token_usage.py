@@ -45,7 +45,11 @@ class TokenUsageRepository:
     ) -> ReservationResult:
         now = now or datetime.utcnow()
         window_start = self.minute_window(now)
-        customer_budget = customer_budget_tokens or settings.CUSTOMER_DEFAULT_TOKENS_PER_MINUTE
+        customer_budget = (
+            customer_budget_tokens or settings.CUSTOMER_DEFAULT_TOKENS_PER_MINUTE
+        )
+        # Store the platform-wide bucket as a synthetic customer. It keeps the
+        # accounting path the same for global and customer limits.
         global_usage = await self._get_or_create_usage(
             session,
             customer_id=GLOBAL_RATE_LIMIT_ID,
@@ -87,6 +91,8 @@ class TokenUsageRepository:
                 ),
             )
 
+        # Reserve before the provider call. Actual usage is written later from
+        # the provider's usage block, but this is the gate that prevents 429s.
         global_usage.reserved_tokens += estimated_tokens
         global_usage.requests_reserved += 1
         customer_usage.reserved_tokens += estimated_tokens
@@ -112,7 +118,9 @@ class TokenUsageRepository:
         customer_budget_tokens: Optional[int] = None,
     ) -> None:
         window_start = self.minute_window(now)
-        customer_budget = customer_budget_tokens or settings.CUSTOMER_DEFAULT_TOKENS_PER_MINUTE
+        customer_budget = (
+            customer_budget_tokens or settings.CUSTOMER_DEFAULT_TOKENS_PER_MINUTE
+        )
         global_usage = await self._get_or_create_usage(
             session,
             customer_id=GLOBAL_RATE_LIMIT_ID,

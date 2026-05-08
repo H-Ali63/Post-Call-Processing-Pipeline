@@ -44,6 +44,8 @@ class LLMWorkerService:
         return len(admitted)
 
     async def _claim_admitted_jobs(self, *, limit: int) -> List[ClaimedLLMJob]:
+        # Keep this transaction short. Claim rows, reserve budget, commit, then
+        # do the slow provider call outside the DB transaction.
         async with async_session_factory() as session:
             async with session.begin():
                 await job_repository.recover_stale_running_jobs(
@@ -91,6 +93,8 @@ class LLMWorkerService:
                         )
                         continue
 
+                    # Snapshot the payload before leaving the transaction. The
+                    # next phase should not hold row locks while waiting on the LLM.
                     admitted.append(self._snapshot(job))
                     await audit_logger.emit(
                         session,
@@ -209,7 +213,9 @@ class LLMWorkerService:
         call_stage = analysis_result.get("call_stage", "unknown")
         result_payload = dict(payload)
         result_payload["analysis_result"] = analysis_result
-        priority = job.priority if isinstance(job.priority, JobPriority) else JobPriority.MEDIUM
+        priority = (
+            job.priority if isinstance(job.priority, JobPriority) else JobPriority.MEDIUM
+        )
 
         await job_repository.create_if_absent(
             session,

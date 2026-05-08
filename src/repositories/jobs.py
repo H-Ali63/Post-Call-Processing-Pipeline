@@ -19,7 +19,9 @@ from src.models.workflow import (
 
 class InteractionJobRepository:
     async def get(self, session: AsyncSession, job_id: UUID) -> Optional[InteractionJob]:
-        result = await session.execute(select(InteractionJob).where(InteractionJob.id == job_id))
+        result = await session.execute(
+            select(InteractionJob).where(InteractionJob.id == job_id)
+        )
         return result.scalar_one_or_none()
 
     async def get_by_idempotency_key(
@@ -51,6 +53,8 @@ class InteractionJobRepository:
     ) -> InteractionJob:
         existing = await self.get_by_idempotency_key(session, idempotency_key)
         if existing is not None:
+            # Webhooks and Celery retries can both repeat. The idempotency key
+            # makes the repeat boring instead of dangerous.
             return existing
 
         job = InteractionJob(
@@ -88,6 +92,8 @@ class InteractionJobRepository:
             else_=3,
         )
 
+        # SKIP LOCKED lets a pool of workers share the table without waiting on
+        # each other. Rows already claimed by one worker are invisible to the next.
         result = await session.execute(
             select(InteractionJob)
             .where(
@@ -114,6 +120,9 @@ class InteractionJobRepository:
         self, session: AsyncSession, *, worker_id: str
     ) -> int:
         cutoff = datetime.utcnow() - timedelta(seconds=settings.JOB_LOCK_TIMEOUT_SECONDS)
+        # If a worker dies after claiming a row, the database still has the
+        # lock timestamp. Move the row back to DEFERRED and let another worker
+        # pick it up on the next pass.
         result = await session.execute(
             select(InteractionJob).where(
                 InteractionJob.status == JobStatus.RUNNING,

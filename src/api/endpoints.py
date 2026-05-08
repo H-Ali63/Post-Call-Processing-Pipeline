@@ -83,6 +83,8 @@ async def end_interaction(
             )
 
         try:
+            # Celery is just a nudge here. The job was already committed above,
+            # so a broker outage should not turn into a lost interaction.
             run_workflow_orchestrator_task.apply_async(
                 queue=settings.WORKFLOW_CELERY_QUEUE, kwargs={"limit": 10}
             )

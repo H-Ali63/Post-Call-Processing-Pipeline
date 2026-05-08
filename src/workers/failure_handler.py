@@ -48,6 +48,8 @@ class JobFailureHandler:
         )
 
         if decision and decision.should_retry and decision.next_run_at is not None:
+            # The row stays in the main queue with a future run_after. That keeps
+            # retry visibility in one place and avoids a second retry system.
             await job_repository.defer(
                 session,
                 job,

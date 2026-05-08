@@ -86,6 +86,8 @@ class WorkflowOrchestrator:
             additional_data=additional_data,
         )
 
+        # Recording and transcript analysis do not depend on each other. Keep
+        # them as separate jobs so a slow recording never blocks the LLM path.
         recording_payload = dict(payload)
         if payload.get("call_sid"):
             await job_repository.create_if_absent(
@@ -103,6 +105,8 @@ class WorkflowOrchestrator:
             )
 
         if classification.skip_llm:
+            # A wrong-number or two-line hangup still needs downstream state,
+            # but there is no point spending LLM quota to learn that.
             await interaction_repository.mark_short_call(session, interaction_id)
             analysis_result = {
                 "call_stage": classification.call_stage,

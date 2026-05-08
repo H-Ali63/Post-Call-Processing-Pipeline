@@ -62,6 +62,8 @@ class RecordingWorkerService:
                 exotel_account_id=str(payload.get("exotel_account_id") or ""),
             )
         except RecordingNotReady as exc:
+            # Exotel commonly returns 404 while the audio is still being prepared.
+            # That is a retry, not a failure of the call.
             metrics.recording_attempts_total.labels(status="not_ready").inc()
             await self._handle_failure(
                 snapshot,
@@ -72,6 +74,8 @@ class RecordingWorkerService:
             )
             return
         except RecordingUnavailable as exc:
+            # Missing call metadata or a permanent provider response should not
+            # churn through the retry queue forever.
             metrics.recording_attempts_total.labels(status="unavailable").inc()
             await self._handle_failure(
                 snapshot,
